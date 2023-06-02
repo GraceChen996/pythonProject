@@ -2,10 +2,10 @@ import matplotlib.pyplot as plt
 import numpy as np
 import tensorflow as tf
 import sys
+# Import Sionna
 import sionna
-
 # Import required Sionna components
-from sionna.fec.ldpc import LDPCBPDecoder
+from sionna.fec.ldpc import LDPCBPDecoder, LDPC5GEncoder, LDPC5GDecoder
 from sionna.utils.metrics import BitwiseMutualInformation
 from sionna.fec.utils import GaussianPriorSource, load_parity_check_examples
 from sionna.utils import ebnodb2no, hard_decisions
@@ -38,7 +38,6 @@ class WeightedBP(tf.keras.Model):
         noise_var = ebnodb2no(ebno_db,
                               num_bits_per_symbol=1,  # BPSK
                               coderate=coderate)
-
         # all-zero CW to calculate loss / BER
         c = tf.zeros([batch_size, n])
 
@@ -54,8 +53,7 @@ class WeightedBP(tf.keras.Model):
 
         loss /= self._num_iter  # scale loss by number of iterations
 
-        return c, c_hat, llr, loss
-
+        return c, c_hat, loss
 
 pcm_path = "BCH_alist/BCH_63_36_5_strip.alist.txt" # the path of parity check matrix
 pcm_matrix = sionna.fec.utils.load_alist(pcm_path)
@@ -65,44 +63,64 @@ num_iter = 5 # set number of decoding iterations
 # and initialize the model
 model = WeightedBP(pcm=pcm, num_iter=num_iter)
 
+# SNR to simulate the results
+ebno_dbs = np.array(np.arange(1, 10.5, 0.5))
+mc_iters = 100 # number of Monte Carlo iterations
+
+# we generate a new PlotBER() object to simulate, store and plot the BER results
+ber_plot = PlotBER("Weighted BP")
+
+# simulate and plot the BER curve of the untrained decoder
+ber_plot.simulate(model,
+                  ebno_dbs=ebno_dbs,
+                  batch_size=1000,
+                  num_target_bit_errors=1000, # stop sim after 1000 bit errors
+                  legend="classical BP decoder",
+                  soft_estimates=True,
+                  max_mc_iter=mc_iters,
+                  forward_keyboard_interrupt=False);
+
 # training parameters
-ebno_db = np.array(np.arange(4, 8, 1))  # s
-batch_size = 1250
+batch_size = 1000
 train_iter = 200
-learning_rate = 0.01
+ebno_db = 4.0
 clip_value_grad = 10 # gradient clipping for stable training convergence
 
 # bmi is used as metric to evaluate the intermediate results
 bmi = BitwiseMutualInformation()
 
 # try also different optimizers or different hyperparameters
-optimizer = tf.keras.optimizers.RMSprop(learning_rate=learning_rate)
-for i in range(0, ebno_db.size):
-    for it in range(0, train_iter):
-        with tf.GradientTape() as tape:
-            c, c_hat, llr, loss = model(batch_size, ebno_db[i])
-            mask = np.ones(batch_size, dtype=bool)
-            for j in range(0, c.shape[0]):
-                d_in = sionna.utils.count_block_errors(hard_decisions(llr[j]), c[j])
-                d_out = sionna.utils.count_block_errors(c_hat[j], c[j])
-                if d_out == 0 or d_out >= d_in:
-                    mask[j] = False
-            c = tf.boolean_mask(c, mask)
-            c_hat = tf.boolean_mask(c_hat, mask)
-            llr = tf.boolean_mask(llr, mask)
-        grads = tape.gradient(loss, model.trainable_variables)
-        grads = tf.clip_by_value(grads, -clip_value_grad, clip_value_grad, name=None)
-        optimizer.apply_gradients(zip(grads, model.trainable_weights))
+optimizer = tf.keras.optimizers.RMSprop(learning_rate=1e-2)
+
+for it in range(0, train_iter):
+    with tf.GradientTape() as tape:
+        b, llr, loss = model(batch_size, ebno_db)
+
+    grads = tape.gradient(loss, model.trainable_variables)
+    grads = tf.clip_by_value(grads, -clip_value_grad, clip_value_grad, name=None)
+    optimizer.apply_gradients(zip(grads, model.trainable_weights))
 
     # calculate and print intermediate metrics
     # only for information
     # this has no impact on the training
-        if it % 10 == 0:  # evaluate every 10 iterations
-            # calculate ber from received LLRs
-            # b_hat = hard_decisions(llr)  # hard decided LLRs first
-            ber = compute_ber(c, c_hat)
-            # and print results
-            mi = bmi(c, llr).numpy()  # calculate bit-wise mutual information
-            l = loss.numpy()  # copy loss to numpy for printing
-            print(f"Current loss: {l:3f} ber: {ber:.4f} bmi: {mi:.3f}".format())
-            bmi.reset_states()  # reset the BMI metric
+    if it%10==0: # evaluate every 10 iterations
+        # calculate ber from received LLRs
+        b_hat = hard_decisions(llr) # hard decided LLRs first
+        ber = compute_ber(b, b_hat)
+        # and print results
+        mi = bmi(b, llr).numpy() # calculate bit-wise mutual information
+        l = loss.numpy() # copy loss to numpy for printing
+        print(f"Current loss: {l:3f} ber: {ber:.4f} bmi: {mi:.3f}".format())
+        bmi.reset_states() # reset the BMI metric
+
+ebno_dbs = np.array(np.arange(1, 10, 0.5))
+batch_size = 10000
+mc_ites = 100
+
+ber_plot.simulate(model,
+                  ebno_dbs=ebno_dbs,
+                  batch_size=1000,
+                  num_target_bit_errors=2000, # stop sim after 2000 bit errors
+                  legend="Trained",
+                  max_mc_iter=mc_iters,
+                  soft_estimates=True);
