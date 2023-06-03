@@ -59,6 +59,14 @@ class WeightedBP(keras.Model):
         # return c, x_hat, llr
 
 
+def choosePrior(S, c):
+
+    model = WeightedBP(pcm=pcm, num_iter=num_iter)
+    c, x_hat, llr = model(batch_size, ebno_db[i])
+    abp = np.abs(c - llr) / n
+    mbce = np.abs(c * np.log(llr) + (1 - c) * np.log(1 - llr)) / n
+
+
 pcm_path = "BCH_alist/BCH_63_36_5_strip.alist.txt"  # the path of parity check matrix
 pcm_matrix = sionna.fec.utils.load_alist(pcm_path)
 pcm, k, n, coderate = sionna.fec.utils.alist2mat(pcm_matrix)
@@ -69,9 +77,9 @@ model = WeightedBP(pcm=pcm, num_iter=num_iter)
 
 # SNR to simulate the results
 ebno_db = np.array(np.arange(4, 8, 1))  # s
-#ebno_db = np.array(4)
+# ebno_db = np.array(4)
 batch_size = 1250
-train_iter = 5
+train_iter = 200
 learning_rate = 0.01
 clip_value_grad = 10  # gradient clipping for stable training convergence
 
@@ -82,22 +90,17 @@ bmi = BitwiseMutualInformation()
 # try also different optimizers or different hyperparameters
 optimizer = tf.keras.optimizers.RMSprop(learning_rate=learning_rate)
 bce = BinaryCrossentropy(from_logits=True)
+
+mu, sigma = choosePrior()
 for i in range(0, ebno_db.size):
     print('SNR={}'.format(ebno_db[i]))
     for it in range(0, train_iter):
         loss = 0
         with tf.GradientTape() as tape:
-            c, x_hat, llr= model(batch_size, ebno_db[i])
-            mask = np.ones(batch_size, dtype=bool)
-            for j in range(0, c.shape[0]):
-                d_in = sionna.utils.count_errors(sionna.utils.hard_decisions(llr[j]), c[j])
-                d_out = sionna.utils.count_errors(sionna.utils.hard_decisions(x_hat[j]), c[j])
-                if d_out == 0 or d_out >= d_in:
-                    mask[j] = False
-            c = tf.boolean_mask(c, mask)
-            x_hat = tf.boolean_mask(x_hat, mask)
-            llr = tf.boolean_mask(llr, mask)
-
+            c, x_hat, llr = model(batch_size, ebno_db[i])
+            abp = np.abs(c - llr) / n
+            mbce = np.abs(c * np.log(llr) + (1 - c) * np.log(1 - llr)) / n
+            theta = tf.concat(abp, mbce)
             # --- implement multi-loss as proposed by Nachmani et al. [1]---
             for ind in range(num_iter):
                 # temp = tf.cast(sionna.utils.hard_decisions(x_hat), tf.float32)
@@ -123,7 +126,7 @@ ber_plot = PlotBER("Weighted BP")
 ber_plot.simulate(model,
                   ebno_dbs=ebno_dbs,
                   batch_size=1000,
-                  num_target_bit_errors=2000, # stop sim after 2000 bit errors
+                  num_target_bit_errors=2000,  # stop sim after 2000 bit errors
                   legend="Trained",
                   max_mc_iter=mc_iters,
                   soft_estimates=True);
