@@ -59,12 +59,13 @@ class WeightedBP(keras.Model):
         # return c, x_hat, llr
 
 
-def choosePrior(S, c):
+def choosePrior(S, c, pcm, num_iter):
 
-    model = WeightedBP(pcm=pcm, num_iter=num_iter)
     c, x_hat, llr = model(batch_size, ebno_db[i])
     abp = np.abs(c - llr) / n
     mbce = np.abs(c * np.log(llr) + (1 - c) * np.log(1 - llr)) / n
+    for t in t_set:
+        model = WeightedBP(pcm=pcm, num_iter=num_iter)
 
 
 pcm_path = "BCH_alist/BCH_63_36_5_strip.alist.txt"  # the path of parity check matrix

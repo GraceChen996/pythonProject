@@ -34,7 +34,7 @@ class WeightedBP(keras.Model):
 
     def call(self, batch_size, ebno_db):
         noise_var = ebnodb2no(ebno_db,
-                              num_bits_per_symbol=1,  # BPSK
+                              num_bits_per_symbol=2,  # QPSK
                               coderate=coderate)
 
         # all-zero CW to calculate loss / BE
@@ -68,10 +68,14 @@ num_iter = 5  # set number of decoding iterations
 model = WeightedBP(pcm=pcm, num_iter=num_iter)
 
 # SNR to simulate the results
-ebno_db = np.array(np.arange(4, 8, 1))  # s
-#ebno_db = np.array(4)
-batch_size = 1250
-train_iter = 200
+# training_ebno_db = np.array(np.arange(3, 6, 1))  # s
+# training_ebno_db = np.array(4)
+sample_ebno_db = np.array(np.arange(4, 5, 1))
+d_H = np.array(np.arange(2, 3, 1))
+distribution_num = 20000
+batch_size = 1250  # 采样集合Q的大小
+
+train_iter = 5
 learning_rate = 0.01
 clip_value_grad = 10  # gradient clipping for stable training convergence
 
@@ -82,22 +86,39 @@ bmi = BitwiseMutualInformation()
 # try also different optimizers or different hyperparameters
 optimizer = tf.keras.optimizers.RMSprop(learning_rate=learning_rate)
 bce = BinaryCrossentropy(from_logits=True)
-for i in range(0, ebno_db.size):
-    print('SNR={}'.format(ebno_db[i]))
+
+for i in range(0, sample_ebno_db.size):
+    print('SNR={}'.format(sample_ebno_db[i]))
+    c, x_hat, llr = model(distribution_num, sample_ebno_db[i])  # 生成特定信噪比下的distribution_num个码字
+    mask = np.ones(distribution_num, dtype=bool)
+    for j in range(0, distribution_num):  # 根据d_H筛选
+        d = sionna.utils.count_errors(sionna.utils.hard_decisions(x_hat[j]), c[j])
+        if d > d_H:
+            mask[j] = False
+    c = tf.boolean_mask(c, mask)
+    x_hat = tf.boolean_mask(x_hat, mask)
+    llr = tf.boolean_mask(llr, mask)
+    c_size = c.shape[0]
+    # 随机采样
+    index = np.array(np.arange(0, c_size, 1))
+    sample_index = np.random.choice(index, 1250)
+    c = tf.gather(c, sample_index)
+    x_hat = tf.gather(x_hat, sample_index)
+    llr = tf.gather(llr, sample_index)
+
+    mask = np.ones(c.shape[0], dtype=bool)
+    for j in range(0, c.shape[0]):
+        d_in = sionna.utils.count_errors(sionna.utils.hard_decisions(llr[j]), c[j])
+        d_out = sionna.utils.count_errors(sionna.utils.hard_decisions(x_hat[j]), c[j])
+        if d_out == 0 or d_out >= d_in:
+            mask[j] = False
+    c = tf.boolean_mask(c, mask)
+    x_hat = tf.boolean_mask(x_hat, mask)
+    llr = tf.boolean_mask(llr, mask)
+
     for it in range(0, train_iter):
         loss = 0
         with tf.GradientTape() as tape:
-            c, x_hat, llr= model(batch_size, ebno_db[i])
-            mask = np.ones(batch_size, dtype=bool)
-            for j in range(0, c.shape[0]):
-                d_in = sionna.utils.count_errors(sionna.utils.hard_decisions(llr[j]), c[j])
-                d_out = sionna.utils.count_errors(sionna.utils.hard_decisions(x_hat[j]), c[j])
-                if d_out == 0 or d_out >= d_in:
-                    mask[j] = False
-            c = tf.boolean_mask(c, mask)
-            x_hat = tf.boolean_mask(x_hat, mask)
-            llr = tf.boolean_mask(llr, mask)
-
             # --- implement multi-loss as proposed by Nachmani et al. [1]---
             for ind in range(num_iter):
                 # temp = tf.cast(sionna.utils.hard_decisions(x_hat), tf.float32)
@@ -116,14 +137,13 @@ for i in range(0, ebno_db.size):
             print(f"Current loss: {l:3f} ber: {ber:.4f} bmi: {mi:.3f}".format())
             bmi.reset_states()  # reset the BMI metric
 
-ebno_dbs = np.array(np.arange(1, 7, 0.5))
-batch_size = 10000
+simulation_ebno_dbs = np.array(np.arange(1, 10, 1))
 mc_iters = 100
 ber_plot = PlotBER("Weighted BP")
 ber_plot.simulate(model,
-                  ebno_dbs=ebno_dbs,
+                  ebno_dbs=simulation_ebno_dbs,
                   batch_size=1000,
-                  num_target_bit_errors=2000, # stop sim after 2000 bit errors
+                  num_target_bit_errors=2000,  # stop sim after 2000 bit errors
                   legend="Trained",
                   max_mc_iter=mc_iters,
                   soft_estimates=True);
